@@ -206,7 +206,66 @@ impl InternalInputPair<'_> {
                 }
             }
             P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-            P2wsh => Err(InputWeightError::NotSupported),
+            P2wsh => {
+                use bitcoin::blockdata::opcodes::all::{
+                    OP_CHECKMULTISIG, OP_PUSHNUM_1, OP_PUSHNUM_16,
+                };
+                use bitcoin::blockdata::script::Instruction;
+
+                let witness_script = match self.psbtin.witness_script.as_ref() {
+                    Some(script) => script,
+                    None => return Err(InputWeightError::NoWitnessScript),
+                };
+
+                let mut instructions = witness_script.instructions();
+
+                // First opcode: OP_PUSHNUM_m
+                let m = match instructions.next() {
+                    Some(Ok(Instruction::Op(op)))
+                        if (OP_PUSHNUM_1.to_u8()..=OP_PUSHNUM_16.to_u8()).contains(&op.to_u8()) =>
+                    {
+                        op.to_u8() - OP_PUSHNUM_1.to_u8() + 1
+                    }
+                    _ => return Err(InputWeightError::NotSupported),
+                };
+
+                // Count pubkeys
+                let mut pubkey_count = 0;
+                while let Some(Ok(Instruction::PushBytes(_))) = instructions.next() {
+                    pubkey_count += 1;
+                }
+
+                // Next opcode: OP_PUSHNUM_n
+                let n = match instructions.next() {
+                    Some(Ok(Instruction::Op(op)))
+                        if (OP_PUSHNUM_1.to_u8()..=OP_PUSHNUM_16.to_u8()).contains(&op.to_u8()) =>
+                    {
+                        op.to_u8() - OP_PUSHNUM_1.to_u8() + 1
+                    }
+                    _ => return Err(InputWeightError::NotSupported),
+                };
+
+                // Expect OP_CHECKMULTISIG
+                match instructions.next() {
+                    Some(Ok(Instruction::Op(OP_CHECKMULTISIG))) => (),
+                    _ => return Err(InputWeightError::NotSupported),
+                }
+
+                if pubkey_count != n as usize || m > n {
+                    return Err(InputWeightError::NotSupported);
+                }
+
+                // Weight estimate: OP_0 + m signatures + witness_script
+                let sig_size = 73; // Max DER signature size
+                let script_size = witness_script.len();
+
+                let witness_size = 1 +     // push count
+                    1 +                           // OP_0 push
+                    m as usize * (1 + sig_size) + // m sigs (each with 1-byte length prefix)
+                    1 + script_size;              // witness_script push
+
+                Ok(InputWeightPrediction::new(sig_size.max(script_size), &[witness_size]))
+            },
             P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
             _ => Err(AddressTypeError::UnknownAddressType.into()),
         }?;
@@ -357,6 +416,7 @@ impl From<FromScriptError> for AddressTypeError {
 pub(crate) enum InputWeightError {
     AddressType(AddressTypeError),
     NoRedeemScript,
+    NoWitnessScript,
     NotSupported,
 }
 
@@ -365,6 +425,7 @@ impl fmt::Display for InputWeightError {
         match self {
             Self::AddressType(_) => write!(f, "invalid address type"),
             Self::NoRedeemScript => write!(f, "p2sh input missing a redeem script"),
+            Self::NoWitnessScript => write!(f, "p2wsh input missing witness script"),
             Self::NotSupported => write!(f, "weight prediction not supported"),
         }
     }
@@ -375,6 +436,7 @@ impl std::error::Error for InputWeightError {
         match self {
             Self::AddressType(error) => Some(error),
             Self::NoRedeemScript => None,
+            Self::NoWitnessScript => None,
             Self::NotSupported => None,
         }
     }
