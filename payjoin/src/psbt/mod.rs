@@ -62,12 +62,13 @@ impl PsbtExt for Psbt {
     fn unknown_mut(&mut self) -> &mut BTreeMap<psbt::raw::Key, Vec<u8>> { &mut self.unknown }
 
     fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair<'_>> + '_> {
+        // TODO(arturgontijo): How can we get a segwit weight here?
         Box::new(
             self.unsigned_tx
                 .input
                 .iter()
                 .zip(&self.inputs)
-                .map(|(txin, psbtin)| InternalInputPair { txin, psbtin }),
+                .map(|(txin, psbtin)| InternalInputPair { txin, psbtin, witness_size: None }),
         )
     }
 
@@ -98,10 +99,14 @@ impl PsbtExt for Psbt {
 // https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#p2wpkh-nested-in-bip16-p2sh
 const NESTED_P2WPKH_MAX: InputWeightPrediction = InputWeightPrediction::from_slice(23, &[72, 33]);
 
+// 32 (txid) + 4 (vout) + 1 (scriptSig length = 0) + 4 (sequence) = 41 * 4 = 164
+const SEGWIT_NON_WITNESS_SIZE: usize = 164;
+
 #[derive(Clone, Debug)]
 pub(crate) struct InternalInputPair<'a> {
     pub txin: &'a TxIn,
     pub psbtin: &'a psbt::Input,
+    pub witness_size: Option<usize>,
 }
 
 impl InternalInputPair<'_> {
@@ -206,7 +211,14 @@ impl InternalInputPair<'_> {
                 }
             }
             P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-            P2wsh => Err(InputWeightError::NotSupported),
+            // Return the weight that was set by user in the InputPair::new_p2wsh()
+            P2wsh => {
+                if let Some(witness_size) = self.witness_size {
+                    Ok(InputWeightPrediction::new(0, &[SEGWIT_NON_WITNESS_SIZE, witness_size]))
+                } else {
+                    Err(InputWeightError::NoWitnessScriptSize)
+                }
+            }
             P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
             _ => Err(AddressTypeError::UnknownAddressType.into()),
         }?;
@@ -351,6 +363,7 @@ impl From<FromScriptError> for AddressTypeError {
 pub(crate) enum InputWeightError {
     AddressType(AddressTypeError),
     NoRedeemScript,
+    NoWitnessScriptSize,
     NotSupported,
 }
 
@@ -359,6 +372,7 @@ impl fmt::Display for InputWeightError {
         match self {
             Self::AddressType(_) => write!(f, "invalid address type"),
             Self::NoRedeemScript => write!(f, "p2sh input missing a redeem script"),
+            Self::NoWitnessScriptSize => write!(f, "p2wsh input missing witness script size"),
             Self::NotSupported => write!(f, "weight prediction not supported"),
         }
     }
@@ -369,6 +383,7 @@ impl std::error::Error for InputWeightError {
         match self {
             Self::AddressType(error) => Some(error),
             Self::NoRedeemScript => None,
+            Self::NoWitnessScriptSize => None,
             Self::NotSupported => None,
         }
     }

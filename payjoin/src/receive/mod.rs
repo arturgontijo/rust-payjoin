@@ -50,7 +50,18 @@ impl InputPair {
     pub fn new(txin: TxIn, psbtin: psbt::Input) -> Result<Self, PsbtInputError> {
         let input_pair = Self { txin, psbtin };
         let raw = InternalInputPair::from(&input_pair);
+        Self::_new(raw)
+    }
+
+    pub fn new_with_witness_size(txin: TxIn, psbtin: psbt::Input, witness_size: usize) -> Result<Self, PsbtInputError> {
+        let input_pair = Self { txin, psbtin };
+        let raw: InternalInputPair<'_> = InternalInputPair::from_pair_with_witness_size(&input_pair, witness_size);
+        Self::_new(raw)
+    }
+
+    fn _new(raw: InternalInputPair<'_>) -> Result<Self, PsbtInputError> {
         raw.validate_utxo()?;
+        let input_pair = Self { txin: raw.txin.clone(), psbtin: raw.psbtin.clone() };
         let address_type = raw.address_type().map_err(InternalPsbtInputError::AddressType)?;
         if address_type == AddressType::P2sh && input_pair.psbtin.redeem_script.is_none() {
             return Err(InternalPsbtInputError::NoRedeemScript.into());
@@ -138,6 +149,7 @@ impl InputPair {
         outpoint: OutPoint,
         sequence: Option<Sequence>,
         witness_script: Option<ScriptBuf>,
+        witness_size: Option<usize>
     ) -> Result<Self, PsbtInputError> {
         let txin = TxIn {
             previous_output: OutPoint { txid: outpoint.txid, vout: outpoint.vout },
@@ -152,7 +164,11 @@ impl InputPair {
             ..psbt::Input::default()
         };
         let input_pair = Self { txin, psbtin };
-        let raw = InternalInputPair::from(&input_pair);
+        let raw = if let Some(witness_size) = witness_size {
+            InternalInputPair::from_pair_with_witness_size(&input_pair, witness_size)
+        } else {
+            InternalInputPair::from(&input_pair)
+        };
         raw.validate_utxo()?;
 
         Ok(input_pair)
@@ -168,7 +184,7 @@ impl InputPair {
             return Err(InternalPsbtInputError::InvalidScriptPubKey(AddressType::P2wpkh).into());
         }
 
-        Self::new_segwit_input_pair(txout, outpoint, sequence, None)
+        Self::new_segwit_input_pair(txout, outpoint, sequence, None, None)
     }
 
     /// Constructs a new ['InputPair'] for spending a native SegWit P2WSH output
@@ -176,13 +192,14 @@ impl InputPair {
         txout: TxOut,
         outpoint: OutPoint,
         witness_script: ScriptBuf,
+        witness_size: usize,
         sequence: Option<Sequence>,
     ) -> Result<Self, PsbtInputError> {
         if !txout.script_pubkey.is_p2wsh() {
             return Err(InternalPsbtInputError::InvalidScriptPubKey(AddressType::P2wsh).into());
         }
 
-        Self::new_segwit_input_pair(txout, outpoint, sequence, Some(witness_script))
+        Self::new_segwit_input_pair(txout, outpoint, sequence, Some(witness_script), Some(witness_size))
     }
 
     /// Constructs a new ['InputPair'] for spending a native SegWit P2TR output
@@ -195,7 +212,7 @@ impl InputPair {
             return Err(InternalPsbtInputError::InvalidScriptPubKey(AddressType::P2tr).into());
         }
 
-        Self::new_segwit_input_pair(txout, outpoint, sequence, None)
+        Self::new_segwit_input_pair(txout, outpoint, sequence, None, None)
     }
 
     pub(crate) fn previous_txout(&self) -> TxOut {
@@ -207,7 +224,11 @@ impl InputPair {
 }
 
 impl<'a> From<&'a InputPair> for InternalInputPair<'a> {
-    fn from(pair: &'a InputPair) -> Self { Self { psbtin: &pair.psbtin, txin: &pair.txin } }
+    fn from(pair: &'a InputPair) -> Self { Self { psbtin: &pair.psbtin, txin: &pair.txin, witness_size: None } }
+}
+
+impl<'a> InternalInputPair<'a> {
+    fn from_pair_with_witness_size(pair: &'a InputPair, witness_size: usize) -> Self { Self { psbtin: &pair.psbtin, txin: &pair.txin, witness_size: Some(witness_size) } }
 }
 
 /// Validate the payload of a Payjoin request for PSBT and Params sanity
@@ -400,10 +421,13 @@ mod tests {
             script_pubkey: ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array(DUMMY32)),
         };
         let witness_script = Builder::new().push_opcode(OP_TRUE).into_script();
+        // TODO(arturgontijo): Not accurate
+        let witness_size = witness_script.len();
         let p2wsh_pair = InputPair::new_p2wsh(
             p2wsh_txout.clone(),
             outpoint,
             witness_script.clone(),
+            witness_size,
             Some(sequence),
         )
         .unwrap();
@@ -417,7 +441,7 @@ mod tests {
             script_pubkey: ScriptBuf::new_p2sh(&ScriptHash::all_zeros()),
         };
         assert_eq!(
-            InputPair::new_p2wsh(p2sh_txout, outpoint, witness_script, Some(sequence))
+            InputPair::new_p2wsh(p2sh_txout, outpoint, witness_script, witness_size, Some(sequence))
                 .err()
                 .unwrap(),
             PsbtInputError::from(InvalidScriptPubKey(AddressType::P2wsh))
