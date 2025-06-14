@@ -40,7 +40,7 @@ use super::error::{
 use super::optional_parameters::Params;
 use super::{InputPair, OutputSubstitutionError, ReplyableError, SelectionError};
 use crate::output_substitution::OutputSubstitution;
-use crate::psbt::{expected_input_weight, PsbtExt};
+use crate::psbt::{expected_input_weight, InternalInputPair, PsbtExt};
 use crate::receive::InternalPayloadError;
 use crate::ImplementationError;
 
@@ -358,7 +358,7 @@ impl WantsOutputs {
             payjoin_psbt: self.payjoin_psbt.clone(),
             params: self.params,
             change_vout: self.change_vout,
-            input_weights: None,
+            internal_input_pairs: None,
         }
     }
 }
@@ -396,7 +396,7 @@ pub struct WantsInputs {
     payjoin_psbt: Psbt,
     params: Params,
     change_vout: usize,
-    input_weights: Option<Vec<Weight>>,
+    internal_input_pairs: Option<Vec<InternalInputPair>>,
 }
 
 impl WantsInputs {
@@ -481,7 +481,7 @@ impl WantsInputs {
         self,
         inputs: impl IntoIterator<Item = InputPair>,
     ) -> Result<WantsInputs, InputContributionError> {
-        self._contribute_inputs(inputs, None)
+        self._contribute_inputs(inputs.into_iter().map(|input| InternalInputPair::from(&input)).collect())
     }
 
     pub fn contribute_inputs_with_weights(
@@ -489,13 +489,13 @@ impl WantsInputs {
         inputs: impl IntoIterator<Item = InputPair>,
         input_weights: impl IntoIterator<Item = Weight>,
     ) -> Result<WantsInputs, InputContributionError> {
-        self._contribute_inputs(inputs, Some(input_weights.into_iter().collect()))
+        let input_weights: Vec<Weight> = input_weights.into_iter().collect();
+        self._contribute_inputs(inputs.into_iter().zip(input_weights).map(|(input, weight)| InternalInputPair::from_with_weight(&input, weight)).collect())
     }
 
     fn _contribute_inputs(
         self,
-        inputs: impl IntoIterator<Item = InputPair>,
-        input_weights: Option<Vec<Weight>>,
+        inputs: Vec<InternalInputPair>,
     ) -> Result<WantsInputs, InputContributionError> {
         let mut payjoin_psbt = self.payjoin_psbt.clone();
         // The payjoin proposal must not introduce mixed input sequence numbers
@@ -510,7 +510,7 @@ impl WantsInputs {
         // Insert contributions at random indices for privacy
         let mut rng = rand::thread_rng();
         let mut receiver_input_amount = Amount::ZERO;
-        for input_pair in inputs.into_iter() {
+        for input_pair in inputs.clone().iter().map(|input| input.pair.clone()) {
             receiver_input_amount += input_pair.previous_txout().value;
             let index = rng.gen_range(0..=self.payjoin_psbt.unsigned_tx.input.len());
             payjoin_psbt.inputs.insert(index, input_pair.psbtin);
@@ -534,7 +534,7 @@ impl WantsInputs {
             payjoin_psbt,
             params: self.params,
             change_vout: self.change_vout,
-            input_weights,
+            internal_input_pairs: Some(inputs),
         })
     }
 
@@ -563,7 +563,7 @@ impl WantsInputs {
             payjoin_psbt: self.payjoin_psbt,
             params: self.params,
             change_vout: self.change_vout,
-            input_weights: self.input_weights,
+            internal_input_pairs: self.internal_input_pairs,
         }
     }
 }
@@ -578,7 +578,7 @@ pub struct ProvisionalProposal {
     payjoin_psbt: Psbt,
     params: Params,
     change_vout: usize,
-    input_weights: Option<Vec<Weight>>,
+    internal_input_pairs: Option<Vec<InternalInputPair>>,
 }
 
 impl ProvisionalProposal {
@@ -666,12 +666,11 @@ impl ProvisionalProposal {
 
     /// Calculate the additional input weight contributed by the receiver
     fn additional_input_weight(&self) -> Result<Weight, InternalPayloadError> {
-        fn inputs_weight(psbt: &Psbt, input_weights: &Option<Vec<Weight>>) -> Result<Weight, InternalPayloadError> {
-            if let Some(input_weights) = input_weights {
+        fn inputs_weight(psbt: &Psbt, internal_input_pairs: &Option<Vec<InternalInputPair>>) -> Result<Weight, InternalPayloadError> {
+            if let Some(internal_input_pairs) = internal_input_pairs {
                 let mut acc = Weight::ZERO;
-                for (input_pair, weight) in psbt.input_pairs().zip(input_weights) {
-                    // TODO(arturgontijo): How can we make sure we are setting the weight of the correct indexed input?
-                    let maybe_weight = Some(*weight);
+                for input_pair in psbt.input_pairs() {
+                    let maybe_weight = internal_input_pairs.iter().find(|input| input.pair.txin.previous_output == input_pair.pair.txin.previous_output).map(|input| input.weight);
                     let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &input_pair.pair.psbtin, maybe_weight)
                         .map_err(InternalPayloadError::InputWeight)?;
                     acc += input_weight;
@@ -681,15 +680,14 @@ impl ProvisionalProposal {
                 psbt.input_pairs().try_fold(
                     Weight::ZERO,
                     |acc, input_pair| -> Result<Weight, InternalPayloadError> {
-                        let input_weight = input_pair
-                            .expected_input_weight()
+                        let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &input_pair.pair.psbtin, Some(Weight::ZERO))
                             .map_err(InternalPayloadError::InputWeight)?;
                         Ok(acc + input_weight)
                     },
                 )
             }
         }
-        let payjoin_inputs_weight = inputs_weight(&self.payjoin_psbt, &self.input_weights)?;
+        let payjoin_inputs_weight = inputs_weight(&self.payjoin_psbt, &self.internal_input_pairs)?;
         let original_inputs_weight = inputs_weight(&self.original_psbt, &None)?;
         let input_contribution_weight = payjoin_inputs_weight - original_inputs_weight;
         log::trace!("input_contribution_weight : {input_contribution_weight}");
@@ -984,7 +982,7 @@ pub(crate) mod test {
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAtTRxwAtk38fRMP3ffdKkIi5r+Ss9AjaO8qEv+eQ/ho3AAAAAAD9////vaqF6DLjuGp9/GH9QflCN38bewEfpxbZBJdnzqdtjecAAAAAAP3///8CgckFKgEAAAAWABThOIsUPXhhul10VWtlrf5mbP3rJBAZBioBAAAAFgAUiDIby0wSbj1kv3MlvwoEKw3vNZUAAAAAAAEAhwIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFoAP////8CAPIFKgEAAAAZdqkUPXhu3I6D9R0wUpvTvvUm+VGNcNuIrAAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAEBIgDyBSoBAAAAGXapFD14btyOg/UdMFKb0771JvlRjXDbiKwBB2pHMEQCIGzKy8QfhHoAY0+LZCpQ7ZOjyyXqaSBnr89hH3Eg/xsGAiB3n8hPRuXCX/iWtURfXoJNUFu3sLeQVFf1dDFCZPN0dAEhA8rTfrwcq6dEBSNOrUfNb8+dm7q77vCtfdOmWx0HfajRAAEAhwIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFKAP////8CAPIFKgEAAAAZdqkUZTGlTpwaV1WmNSb2tXYH6NOWmEOIrAAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAAAAA==").unwrap(),
             params: Params::default(),
             change_vout: 0,
-            input_weights: None,
+            internal_input_pairs: None,
         };
         assert_eq!(
             p2pkh_proposal.additional_input_weight().expect("should calculate input weight"),
@@ -997,7 +995,7 @@ pub(crate) mod test {
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAuXYOTUaVRiB8cPPhEXzcJ72/SgZOPEpPx5pkG0fNeGCAAAAAAD9////46xP1xFZHPe175uCa3B4bW8MuR1IfjTns26ih0M08VYAAAAAAP3///8CEBkGKgEAAAAWABQHuuu4H4fbQWV51IunoJLUtmMTfEzKBSoBAAAAFgAU4OWmUOgToQaVm+aqhSeAGCy7yoIAAAAAAAEBIADyBSoBAAAAF6kUQ4BssmVBS3r0s95c6dl1DQCHCR+HAQQWABQbDc333XiiOeEXroP523OoYNb1aAABAIUCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBZwD/////AgDyBSoBAAAAF6kU2JnIn4Mmcb5kuF3EYeFei8IB43qHAAAAAAAAAAAmaiSqIant4vYcP3HR3v0/qZnfo2lTdVxpBol5mWK0i+vYNpdOjPkAAAAAAQEgAPIFKgEAAAAXqRTYmcifgyZxvmS4XcRh4V6LwgHjeocBBxcWABSPGoPK1yl60X4Z9OfA7IQPUWCgVwEIawJHMEQCICZG3s2cbulPnLTvK4TwlKhsC+cem8tD2GjZZ3eMJD7FAiADh/xwv0ib8ksOrj1M27DYLiw7WFptxkMkE2YgiNMRVgEhAlDMm5DA8kU+QGiPxEWUyV1S8+XGzUOepUOck257ZOhkAAAA").unwrap(),
             params: Params::default(),
             change_vout: 0,
-            input_weights: None,
+            internal_input_pairs: None,
         };
         assert_eq!(
             nested_p2wpkh_proposal
@@ -1012,7 +1010,7 @@ pub(crate) mod test {
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAiom13OiXZIr3bKk+LtUndZJYqdHQQU8dMs1FZ93IctIAAAAAAD9////NG21aH8Vat3thaVmPvWDV/lvRmymFHeePcfUjlyngHIAAAAAAP3///8CH8oFKgEAAAAWABTof3xgz00TWVoBFD+33/3ScWtp/hAZBioBAAAAFgAU1mbnqky3bMxfmm0OgFaQCAs5fsoAAAAAAAEAhAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFbAP////8CAPIFKgEAAAAWABSNMleYLvef5RFI11+BtLo5ronJBgAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAEBHwDyBSoBAAAAFgAUjTJXmC73n+URSNdfgbS6Oa6JyQYAAQCEAgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////8DAWcA/////wIA8gUqAQAAABYAFJFtkfHTt3y1EDMaN6CFjjNWtpCRAAAAAAAAAAAmaiSqIant4vYcP3HR3v0/qZnfo2lTdVxpBol5mWK0i+vYNpdOjPkAAAAAAQEfAPIFKgEAAAAWABSRbZHx07d8tRAzGjeghY4zVraQkQEIawJHMEQCIDTC49IB9AnItqd8zy5RDc05f2ApBAfJ5x4zYfj3bsD2AiAQvvSt5ipScHcUwdlYB9vFnEi68hmh55M5a5e+oWvxMAEhAqErVSVulFb97/r5KQryOS1Xgghff8R7AOuEnvnmslQ5AAAA").unwrap(),
             params: Params::default(),
             change_vout: 0,
-            input_weights: None,
+            internal_input_pairs: None,
         };
         assert_eq!(
             p2wpkh_proposal.additional_input_weight().expect("should calculate input weight"),
@@ -1025,7 +1023,7 @@ pub(crate) mod test {
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAk/CHxd1oi9Lq1xOD2GnHe0hsQdGJ2mkpYkmeasTj+w1AAAAAAD9////Fz+ELsYp/55j6+Jl2unG9sGvpHTiSyzSORBvtu1GEB4AAAAAAP3///8CM8oFKgEAAAAWABSokv88M+cd6KGE2G6RPPxAR1ltkBAZBioBAAAAFgAU68J5imRcKy3g5JCT3bEoP9IXEn0AAAAAAAEBKwDyBSoBAAAAIlEgY496Q0oWz0BIuPcV2UIuKi7+N09R6AkbOUDXXUDzQwAAAQErAPIFKgEAAAAiUSCfbbX+FHJbzC71eEFLsMjDouMJbu8ogeR0eNoNxMM9CwEIQwFBeyOLUebV/YwpaLTpLIaTXaSiPS7Dn6o39X4nlUzQLfb6YyvCAsLA5GTxo+Zb0NUINZ8DaRyUWknOpU/Jzuwn2gEAAAA=").unwrap(),
             params: Params::default(),
             change_vout: 0,
-            input_weights: None,
+            internal_input_pairs: None,
         };
         assert_eq!(
             p2tr_proposal.additional_input_weight().expect("should calculate input weight"),

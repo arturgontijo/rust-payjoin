@@ -10,6 +10,7 @@ use bitcoin::address::FromScriptError;
 use bitcoin::psbt::Psbt;
 use bitcoin::transaction::InputWeightPrediction;
 use bitcoin::{bip32, psbt, Address, AddressType, Network, TxOut, Weight};
+use serde::{Deserialize, Serialize};
 
 use crate::receive::InputPair;
 
@@ -104,7 +105,7 @@ impl PsbtExt for Psbt {
 const NESTED_P2WPKH_MAX: InputWeightPrediction = InputWeightPrediction::from_slice(23, &[72, 33]);
 
 // TODO(arturgontijo): InputPairWithWeight makes more sense...
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InternalInputPair {
     pub pair: InputPair,
     pub weight: Weight,
