@@ -391,7 +391,11 @@ impl InputPair {
         txin: bitcoin_ffi::TxIn,
         psbtin: crate::bitcoin_ffi::PsbtInput,
     ) -> Result<Self, PsbtInputError> {
-        Ok(Self(payjoin::receive::InputPair::new(txin.into(), psbtin.into())?))
+        Ok(Self(payjoin::receive::InputPair::new(
+            txin.into(),
+            psbtin.into(),
+            None,
+        )?))
     }
 }
 

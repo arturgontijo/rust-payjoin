@@ -11,16 +11,21 @@
 
 use std::str::FromStr;
 
-use bitcoin::{psbt, AddressType, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut};
+use bitcoin::{
+    psbt, AddressType, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Weight,
+};
 pub(crate) use error::InternalPayloadError;
 pub use error::{
     Error, InputContributionError, JsonReply, OutputSubstitutionError, PayloadError,
     ReplyableError, SelectionError,
 };
 use optional_parameters::Params;
+use serde::{Deserialize, Serialize};
 
 pub use crate::psbt::PsbtInputError;
-use crate::psbt::{InternalInputPair, InternalPsbtInputError, PrevTxOutError, PsbtExt};
+use crate::psbt::{
+    InputWeightError, InternalInputPair, InternalPsbtInputError, PrevTxOutError, PsbtExt,
+};
 use crate::Version;
 
 mod error;
@@ -40,22 +45,35 @@ pub mod v2;
 
 /// Helper to construct a pair of (txin, psbtin) with some built-in validation
 /// Use with [`InputPair::new`] to contribute receiver inputs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputPair {
     pub(crate) txin: TxIn,
     pub(crate) psbtin: psbt::Input,
+    pub(crate) expected_weight: Weight,
 }
 
 impl InputPair {
-    pub fn new(txin: TxIn, psbtin: psbt::Input) -> Result<Self, PsbtInputError> {
-        let input_pair = Self { txin, psbtin };
+    pub fn new(
+        txin: TxIn,
+        psbtin: psbt::Input,
+        expected_weight: Option<Weight>,
+    ) -> Result<Self, PsbtInputError> {
+        let input_pair = Self { txin, psbtin, expected_weight: Weight::ZERO };
         let raw = InternalInputPair::from(&input_pair);
         raw.validate_utxo()?;
-        let address_type = raw.address_type().map_err(InternalPsbtInputError::AddressType)?;
-        if address_type == AddressType::P2sh && input_pair.psbtin.redeem_script.is_none() {
-            return Err(InternalPsbtInputError::NoRedeemScript.into());
-        }
-        Ok(input_pair)
+
+        let expected_weight = match raw.expected_input_weight() {
+            Ok(weight) => weight,
+            Err(InputWeightError::NotSupported) =>
+                if let Some(weight) = expected_weight {
+                    weight
+                } else {
+                    return Err(InternalPsbtInputError::from(InputWeightError::NotSupported).into());
+                },
+            Err(e) => return Err(InternalPsbtInputError::from(e).into()),
+        };
+
+        Ok(Self { expected_weight, ..input_pair })
     }
 
     /// Helper function for creating legacy input pairs
@@ -78,11 +96,7 @@ impl InputPair {
             ..psbt::Input::default()
         };
 
-        let input_pair = Self { txin, psbtin };
-        let raw = InternalInputPair::from(&input_pair);
-        raw.validate_utxo()?;
-
-        Ok(input_pair)
+        Self::new(txin, psbtin, None)
     }
 
     fn get_txout_for_outpoint(
@@ -151,11 +165,8 @@ impl InputPair {
             witness_script,
             ..psbt::Input::default()
         };
-        let input_pair = Self { txin, psbtin };
-        let raw = InternalInputPair::from(&input_pair);
-        raw.validate_utxo()?;
 
-        Ok(input_pair)
+        Self::new(txin, psbtin, None)
     }
 
     /// Constructs a new ['InputPair'] for spending a native SegWit P2WPKH output

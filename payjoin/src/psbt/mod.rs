@@ -245,6 +245,7 @@ pub(crate) enum InternalPsbtInputError {
     AddressType(AddressTypeError),
     NoRedeemScript,
     InvalidScriptPubKey(AddressType),
+    WeightError(InputWeightError),
 }
 
 impl fmt::Display for InternalPsbtInputError {
@@ -255,7 +256,8 @@ impl fmt::Display for InternalPsbtInputError {
             Self::SegWitTxOutMismatch => write!(f, "transaction output provided in SegWit UTXO field doesn't match the one in non-SegWit UTXO field"),
             Self::AddressType(_) => write!(f, "invalid address type"),
             Self::NoRedeemScript => write!(f, "provided p2sh PSBT input is missing a redeem_script"),
-            Self::InvalidScriptPubKey(e) => write!(f, "provided script was not a valid type of {e}")
+            Self::InvalidScriptPubKey(e) => write!(f, "provided script was not a valid type of {e}"),
+            Self::WeightError(e) => write!(f, "{}", e),
         }
     }
 }
@@ -269,6 +271,7 @@ impl std::error::Error for InternalPsbtInputError {
             Self::AddressType(error) => Some(error),
             Self::NoRedeemScript => None,
             Self::InvalidScriptPubKey(_) => None,
+            Self::WeightError(error) => Some(error),
         }
     }
 }
@@ -279,6 +282,10 @@ impl From<PrevTxOutError> for InternalPsbtInputError {
 
 impl From<AddressTypeError> for InternalPsbtInputError {
     fn from(value: AddressTypeError) -> Self { Self::AddressType(value) }
+}
+
+impl From<InputWeightError> for InternalPsbtInputError {
+    fn from(value: InputWeightError) -> Self { Self::WeightError(value) }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -347,7 +354,7 @@ impl From<FromScriptError> for AddressTypeError {
     fn from(value: FromScriptError) -> Self { Self::InvalidScript(value) }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum InputWeightError {
     AddressType(AddressTypeError),
     NoRedeemScript,
