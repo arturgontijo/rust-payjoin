@@ -671,7 +671,7 @@ impl ProvisionalProposal {
                 let mut acc = Weight::ZERO;
                 for input_pair in psbt.input_pairs() {
                     let maybe_weight = internal_input_pairs.iter().find(|input| input.pair.txin.previous_output == input_pair.pair.txin.previous_output).map(|input| input.weight);
-                    let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &input_pair.pair.psbtin, maybe_weight)
+                    let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &InternalInputPair { pair: input_pair.pair.clone(), weight: maybe_weight.unwrap_or(Weight::ZERO) })
                         .map_err(InternalPayloadError::InputWeight)?;
                     acc += input_weight;
                 }
@@ -680,7 +680,8 @@ impl ProvisionalProposal {
                 psbt.input_pairs().try_fold(
                     Weight::ZERO,
                     |acc, input_pair| -> Result<Weight, InternalPayloadError> {
-                        let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &input_pair.pair.psbtin, Some(Weight::ZERO))
+                        let input_weight = input_pair
+                            .expected_input_weight()
                             .map_err(InternalPayloadError::InputWeight)?;
                         Ok(acc + input_weight)
                     },

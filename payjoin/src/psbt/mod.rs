@@ -189,11 +189,11 @@ impl InternalInputPair {
     }
 
     pub fn expected_input_weight(&self) -> Result<Weight, InputWeightError> {
-        expected_input_weight(self.address_type()?, &self.pair.psbtin, Some(self.weight))
+        expected_input_weight(self.address_type()?, &self)
     }
 }
 
-pub fn expected_input_weight(address_type: AddressType, psbtin: &psbt::Input, maybe_weight: Option<Weight>) -> Result<Weight, InputWeightError> {
+pub fn expected_input_weight(address_type: AddressType, internal_input_pair: &InternalInputPair) -> Result<Weight, InputWeightError> {
     use bitcoin::AddressType::*;
 
     // Get the input weight prediction corresponding to spending an output of this address type
@@ -201,11 +201,11 @@ pub fn expected_input_weight(address_type: AddressType, psbtin: &psbt::Input, ma
         P2pkh => Ok(InputWeightPrediction::P2PKH_COMPRESSED_MAX),
         P2sh => {
             // redeemScript can be extracted from scriptSig for signed P2SH inputs
-            let redeem_script = if let Some(ref script_sig) = psbtin.final_script_sig {
+            let redeem_script = if let Some(ref script_sig) = internal_input_pair.pair.psbtin.final_script_sig {
                 script_sig.redeem_script()
                 // try the PSBT redeem_script field for unsigned inputs.
             } else {
-                psbtin.redeem_script.as_ref().map(|script| script.as_ref())
+                internal_input_pair.pair.psbtin.redeem_script.as_ref().map(|script| script.as_ref())
             };
             match redeem_script {
                 // Nested segwit p2wpkh.
@@ -218,8 +218,11 @@ pub fn expected_input_weight(address_type: AddressType, psbtin: &psbt::Input, ma
             }
         }
         P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-        P2wsh => if let Some(weight) = maybe_weight {
-            let witness_size = weight.to_wu() as usize;
+        P2wsh => if internal_input_pair.pair.psbtin.final_script_witness.is_some() {
+            let witness_size = internal_input_pair.pair.txin.segwit_weight().to_wu() as usize;
+            Ok(InputWeightPrediction::new(0, &[witness_size]))
+        } else if internal_input_pair.weight > Weight::ZERO {
+            let witness_size = internal_input_pair.weight.to_wu() as usize;
             Ok(InputWeightPrediction::new(0, &[witness_size]))
         } else {
             Err(InputWeightError::NotSupported)
