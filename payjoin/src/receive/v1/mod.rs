@@ -40,7 +40,7 @@ use super::error::{
 use super::optional_parameters::Params;
 use super::{InputPair, OutputSubstitutionError, ReplyableError, SelectionError};
 use crate::output_substitution::OutputSubstitution;
-use crate::psbt::PsbtExt;
+use crate::psbt::{expected_input_weight, PsbtExt};
 use crate::receive::InternalPayloadError;
 use crate::ImplementationError;
 
@@ -186,11 +186,11 @@ impl MaybeInputsSeen {
         is_known: impl Fn(&OutPoint) -> Result<bool, ImplementationError>,
     ) -> Result<OutputsUnknown, ReplyableError> {
         self.psbt.input_pairs().try_for_each(|input| {
-            match is_known(&input.txin.previous_output) {
+            match is_known(&input.pair.txin.previous_output) {
                 Ok(false) => Ok::<(), ReplyableError>(()),
                 Ok(true) =>  {
-                    log::warn!("Request contains an input we've seen before: {}. Preventing possible probing attack.", input.txin.previous_output);
-                    Err(InternalPayloadError::InputSeen(input.txin.previous_output))?
+                    log::warn!("Request contains an input we've seen before: {}. Preventing possible probing attack.", input.pair.txin.previous_output);
+                    Err(InternalPayloadError::InputSeen(input.pair.txin.previous_output))?
                 },
                 Err(e) => Err(ReplyableError::Implementation(e))?,
             }
@@ -355,9 +355,10 @@ impl WantsOutputs {
     pub fn commit_outputs(self) -> WantsInputs {
         WantsInputs {
             original_psbt: self.original_psbt,
-            payjoin_psbt: self.payjoin_psbt,
+            payjoin_psbt: self.payjoin_psbt.clone(),
             params: self.params,
             change_vout: self.change_vout,
+            input_weights: None,
         }
     }
 }
@@ -395,6 +396,7 @@ pub struct WantsInputs {
     payjoin_psbt: Psbt,
     params: Params,
     change_vout: usize,
+    input_weights: Option<Vec<Weight>>,
 }
 
 impl WantsInputs {
@@ -479,6 +481,22 @@ impl WantsInputs {
         self,
         inputs: impl IntoIterator<Item = InputPair>,
     ) -> Result<WantsInputs, InputContributionError> {
+        self._contribute_inputs(inputs, None)
+    }
+
+    pub fn contribute_inputs_with_weights(
+        self,
+        inputs: impl IntoIterator<Item = InputPair>,
+        input_weights: impl IntoIterator<Item = Weight>,
+    ) -> Result<WantsInputs, InputContributionError> {
+        self._contribute_inputs(inputs, Some(input_weights.into_iter().collect()))
+    }
+
+    fn _contribute_inputs(
+        self,
+        inputs: impl IntoIterator<Item = InputPair>,
+        input_weights: Option<Vec<Weight>>,
+    ) -> Result<WantsInputs, InputContributionError> {
         let mut payjoin_psbt = self.payjoin_psbt.clone();
         // The payjoin proposal must not introduce mixed input sequence numbers
         let original_sequence = self
@@ -516,6 +534,7 @@ impl WantsInputs {
             payjoin_psbt,
             params: self.params,
             change_vout: self.change_vout,
+            input_weights,
         })
     }
 
@@ -544,6 +563,7 @@ impl WantsInputs {
             payjoin_psbt: self.payjoin_psbt,
             params: self.params,
             change_vout: self.change_vout,
+            input_weights: self.input_weights,
         }
     }
 }
@@ -558,6 +578,7 @@ pub struct ProvisionalProposal {
     payjoin_psbt: Psbt,
     params: Params,
     change_vout: usize,
+    input_weights: Option<Vec<Weight>>,
 }
 
 impl ProvisionalProposal {
@@ -645,19 +666,31 @@ impl ProvisionalProposal {
 
     /// Calculate the additional input weight contributed by the receiver
     fn additional_input_weight(&self) -> Result<Weight, InternalPayloadError> {
-        fn inputs_weight(psbt: &Psbt) -> Result<Weight, InternalPayloadError> {
-            psbt.input_pairs().try_fold(
-                Weight::ZERO,
-                |acc, input_pair| -> Result<Weight, InternalPayloadError> {
-                    let input_weight = input_pair
-                        .expected_input_weight()
+        fn inputs_weight(psbt: &Psbt, input_weights: &Option<Vec<Weight>>) -> Result<Weight, InternalPayloadError> {
+            if let Some(input_weights) = input_weights {
+                let mut acc = Weight::ZERO;
+                for (input_pair, weight) in psbt.input_pairs().zip(input_weights) {
+                    // TODO(arturgontijo): How can we make sure we are setting the weight of the correct indexed input?
+                    let maybe_weight = Some(*weight);
+                    let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &input_pair.pair.psbtin, maybe_weight)
                         .map_err(InternalPayloadError::InputWeight)?;
-                    Ok(acc + input_weight)
-                },
-            )
+                    acc += input_weight;
+                }
+                Ok(acc)
+            } else {
+                psbt.input_pairs().try_fold(
+                    Weight::ZERO,
+                    |acc, input_pair| -> Result<Weight, InternalPayloadError> {
+                        let input_weight = input_pair
+                            .expected_input_weight()
+                            .map_err(InternalPayloadError::InputWeight)?;
+                        Ok(acc + input_weight)
+                    },
+                )
+            }
         }
-        let payjoin_inputs_weight = inputs_weight(&self.payjoin_psbt)?;
-        let original_inputs_weight = inputs_weight(&self.original_psbt)?;
+        let payjoin_inputs_weight = inputs_weight(&self.payjoin_psbt, &self.input_weights)?;
+        let original_inputs_weight = inputs_weight(&self.original_psbt, &None)?;
         let input_contribution_weight = payjoin_inputs_weight - original_inputs_weight;
         log::trace!("input_contribution_weight : {input_contribution_weight}");
         Ok(input_contribution_weight)
@@ -729,10 +762,10 @@ impl ProvisionalProposal {
             if let Some(original) = original_inputs.peek() {
                 log::trace!(
                     "match previous_output: {} == {}",
-                    input.txin.previous_output,
-                    original.txin.previous_output
+                    input.pair.txin.previous_output,
+                    original.pair.txin.previous_output
                 );
-                if input.txin.previous_output == original.txin.previous_output {
+                if input.pair.txin.previous_output == original.pair.txin.previous_output {
                     sender_input_indexes.push(i);
                     original_inputs.next();
                 }
@@ -950,7 +983,8 @@ pub(crate) mod test {
             original_psbt: Psbt::from_str("cHNidP8BAHECAAAAAb2qhegy47hqffxh/UH5Qjd/G3sBH6cW2QSXZ86nbY3nAAAAAAD9////AhXKBSoBAAAAFgAU4TiLFD14YbpddFVrZa3+Zmz96yQQJwAAAAAAABYAFB4zA2o+5MsNRT/j+0twLi5VbwO9AAAAAAABAIcCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBSgD/////AgDyBSoBAAAAGXapFGUxpU6cGldVpjUm9rV2B+jTlphDiKwAAAAAAAAAACZqJKohqe3i9hw/cdHe/T+pmd+jaVN1XGkGiXmZYrSL69g2l06M+QAAAAABB2pHMEQCIGsOxO/bBv20bd68sBnEU3cxHR8OxEcUroL3ENhhjtN3AiB+9yWuBGKXu41hcfO4KP7IyLLEYc6j8hGowmAlCPCMPAEhA6WNSN4CqJ9F+42YKPlIFN0wJw7qawWbdelGRMkAbBRnACICAsdIAjsfMLKgfL2J9rfIa8yKdO1BOpSGRIFbFMBdTsc9GE4roNNUAACAAQAAgAAAAIABAAAAAAAAAAAA").unwrap(),
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAtTRxwAtk38fRMP3ffdKkIi5r+Ss9AjaO8qEv+eQ/ho3AAAAAAD9////vaqF6DLjuGp9/GH9QflCN38bewEfpxbZBJdnzqdtjecAAAAAAP3///8CgckFKgEAAAAWABThOIsUPXhhul10VWtlrf5mbP3rJBAZBioBAAAAFgAUiDIby0wSbj1kv3MlvwoEKw3vNZUAAAAAAAEAhwIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFoAP////8CAPIFKgEAAAAZdqkUPXhu3I6D9R0wUpvTvvUm+VGNcNuIrAAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAEBIgDyBSoBAAAAGXapFD14btyOg/UdMFKb0771JvlRjXDbiKwBB2pHMEQCIGzKy8QfhHoAY0+LZCpQ7ZOjyyXqaSBnr89hH3Eg/xsGAiB3n8hPRuXCX/iWtURfXoJNUFu3sLeQVFf1dDFCZPN0dAEhA8rTfrwcq6dEBSNOrUfNb8+dm7q77vCtfdOmWx0HfajRAAEAhwIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFKAP////8CAPIFKgEAAAAZdqkUZTGlTpwaV1WmNSb2tXYH6NOWmEOIrAAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAAAAA==").unwrap(),
             params: Params::default(),
-            change_vout: 0
+            change_vout: 0,
+            input_weights: None,
         };
         assert_eq!(
             p2pkh_proposal.additional_input_weight().expect("should calculate input weight"),
@@ -962,7 +996,8 @@ pub(crate) mod test {
             original_psbt: Psbt::from_str("cHNidP8BAHECAAAAAeOsT9cRWRz3te+bgmtweG1vDLkdSH4057NuoodDNPFWAAAAAAD9////AhAnAAAAAAAAFgAUtp3bPFM/YWThyxD5Cc9OR4mb8tdMygUqAQAAABYAFODlplDoE6EGlZvmqoUngBgsu8qCAAAAAAABAIUCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBZwD/////AgDyBSoBAAAAF6kU2JnIn4Mmcb5kuF3EYeFei8IB43qHAAAAAAAAAAAmaiSqIant4vYcP3HR3v0/qZnfo2lTdVxpBol5mWK0i+vYNpdOjPkAAAAAAQEgAPIFKgEAAAAXqRTYmcifgyZxvmS4XcRh4V6LwgHjeocBBxcWABSPGoPK1yl60X4Z9OfA7IQPUWCgVwEIawJHMEQCICZG3s2cbulPnLTvK4TwlKhsC+cem8tD2GjZZ3eMJD7FAiADh/xwv0ib8ksOrj1M27DYLiw7WFptxkMkE2YgiNMRVgEhAlDMm5DA8kU+QGiPxEWUyV1S8+XGzUOepUOck257ZOhkAAAiAgP+oMbeca66mt+UtXgHm6v/RIFEpxrwG7IvPDim5KWHpBgfVHrXVAAAgAEAAIAAAACAAQAAAAAAAAAA").unwrap(),
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAuXYOTUaVRiB8cPPhEXzcJ72/SgZOPEpPx5pkG0fNeGCAAAAAAD9////46xP1xFZHPe175uCa3B4bW8MuR1IfjTns26ih0M08VYAAAAAAP3///8CEBkGKgEAAAAWABQHuuu4H4fbQWV51IunoJLUtmMTfEzKBSoBAAAAFgAU4OWmUOgToQaVm+aqhSeAGCy7yoIAAAAAAAEBIADyBSoBAAAAF6kUQ4BssmVBS3r0s95c6dl1DQCHCR+HAQQWABQbDc333XiiOeEXroP523OoYNb1aAABAIUCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBZwD/////AgDyBSoBAAAAF6kU2JnIn4Mmcb5kuF3EYeFei8IB43qHAAAAAAAAAAAmaiSqIant4vYcP3HR3v0/qZnfo2lTdVxpBol5mWK0i+vYNpdOjPkAAAAAAQEgAPIFKgEAAAAXqRTYmcifgyZxvmS4XcRh4V6LwgHjeocBBxcWABSPGoPK1yl60X4Z9OfA7IQPUWCgVwEIawJHMEQCICZG3s2cbulPnLTvK4TwlKhsC+cem8tD2GjZZ3eMJD7FAiADh/xwv0ib8ksOrj1M27DYLiw7WFptxkMkE2YgiNMRVgEhAlDMm5DA8kU+QGiPxEWUyV1S8+XGzUOepUOck257ZOhkAAAA").unwrap(),
             params: Params::default(),
-            change_vout: 0
+            change_vout: 0,
+            input_weights: None,
         };
         assert_eq!(
             nested_p2wpkh_proposal
@@ -976,7 +1011,8 @@ pub(crate) mod test {
             original_psbt: Psbt::from_str("cHNidP8BAHECAAAAASom13OiXZIr3bKk+LtUndZJYqdHQQU8dMs1FZ93IctIAAAAAAD9////AmPKBSoBAAAAFgAU6H98YM9NE1laARQ/t9/90nFraf4QJwAAAAAAABYAFBPJFmYuJBsrIaBBp9ur98pMSKxhAAAAAAABAIQCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMBWwD/////AgDyBSoBAAAAFgAUjTJXmC73n+URSNdfgbS6Oa6JyQYAAAAAAAAAACZqJKohqe3i9hw/cdHe/T+pmd+jaVN1XGkGiXmZYrSL69g2l06M+QAAAAABAR8A8gUqAQAAABYAFI0yV5gu95/lEUjXX4G0ujmuickGAQhrAkcwRAIgUqbHS0difIGTRwN56z2/EiqLQFWerfJspyjuwsGSCXcCIA3IRTu8FVgniU5E4gecAMeegVnlTbTVfFyusWhQ2kVVASEDChVRm26KidHNWLdCLBTq5jspGJr+AJyyMqmUkvPkwFsAIgIDeBqmRB3ESjFWIp+wUXn/adGZU3kqWGjdkcnKpk8bAyUY94v8N1QAAIABAACAAAAAgAEAAAAAAAAAAAA=").unwrap(),
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAiom13OiXZIr3bKk+LtUndZJYqdHQQU8dMs1FZ93IctIAAAAAAD9////NG21aH8Vat3thaVmPvWDV/lvRmymFHeePcfUjlyngHIAAAAAAP3///8CH8oFKgEAAAAWABTof3xgz00TWVoBFD+33/3ScWtp/hAZBioBAAAAFgAU1mbnqky3bMxfmm0OgFaQCAs5fsoAAAAAAAEAhAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AwFbAP////8CAPIFKgEAAAAWABSNMleYLvef5RFI11+BtLo5ronJBgAAAAAAAAAAJmokqiGp7eL2HD9x0d79P6mZ36NpU3VcaQaJeZlitIvr2DaXToz5AAAAAAEBHwDyBSoBAAAAFgAUjTJXmC73n+URSNdfgbS6Oa6JyQYAAQCEAgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////8DAWcA/////wIA8gUqAQAAABYAFJFtkfHTt3y1EDMaN6CFjjNWtpCRAAAAAAAAAAAmaiSqIant4vYcP3HR3v0/qZnfo2lTdVxpBol5mWK0i+vYNpdOjPkAAAAAAQEfAPIFKgEAAAAWABSRbZHx07d8tRAzGjeghY4zVraQkQEIawJHMEQCIDTC49IB9AnItqd8zy5RDc05f2ApBAfJ5x4zYfj3bsD2AiAQvvSt5ipScHcUwdlYB9vFnEi68hmh55M5a5e+oWvxMAEhAqErVSVulFb97/r5KQryOS1Xgghff8R7AOuEnvnmslQ5AAAA").unwrap(),
             params: Params::default(),
-            change_vout: 0
+            change_vout: 0,
+            input_weights: None,
         };
         assert_eq!(
             p2wpkh_proposal.additional_input_weight().expect("should calculate input weight"),
@@ -988,7 +1024,8 @@ pub(crate) mod test {
             original_psbt: Psbt::from_str("cHNidP8BAHECAAAAAU/CHxd1oi9Lq1xOD2GnHe0hsQdGJ2mkpYkmeasTj+w1AAAAAAD9////Am3KBSoBAAAAFgAUqJL/PDPnHeihhNhukTz8QEdZbZAQJwAAAAAAABYAFInyO0NQF7YR22Sm0YTPGm6yf19YAAAAAAABASsA8gUqAQAAACJRIGOPekNKFs9ASLj3FdlCLiou/jdPUegJGzlA111A80MAAQhCAUC3zX8eSeL8+bAo6xO0cpon83UsJdttiuwfMn/pBwub82rzMsoS6HZNXzg7hfcB3p1uj8JmqsBkZwm8k6fnU2peACICA+u+FjwmhEgWdjhEQbO49D0NG8iCYUoqhlfsj0LN7hiRGOcVI65UAACAAQAAgAAAAIABAAAAAAAAAAAA").unwrap(),
             payjoin_psbt: Psbt::from_str("cHNidP8BAJoCAAAAAk/CHxd1oi9Lq1xOD2GnHe0hsQdGJ2mkpYkmeasTj+w1AAAAAAD9////Fz+ELsYp/55j6+Jl2unG9sGvpHTiSyzSORBvtu1GEB4AAAAAAP3///8CM8oFKgEAAAAWABSokv88M+cd6KGE2G6RPPxAR1ltkBAZBioBAAAAFgAU68J5imRcKy3g5JCT3bEoP9IXEn0AAAAAAAEBKwDyBSoBAAAAIlEgY496Q0oWz0BIuPcV2UIuKi7+N09R6AkbOUDXXUDzQwAAAQErAPIFKgEAAAAiUSCfbbX+FHJbzC71eEFLsMjDouMJbu8ogeR0eNoNxMM9CwEIQwFBeyOLUebV/YwpaLTpLIaTXaSiPS7Dn6o39X4nlUzQLfb6YyvCAsLA5GTxo+Zb0NUINZ8DaRyUWknOpU/Jzuwn2gEAAAA=").unwrap(),
             params: Params::default(),
-            change_vout: 0
+            change_vout: 0,
+            input_weights: None,
         };
         assert_eq!(
             p2tr_proposal.additional_input_weight().expect("should calculate input weight"),

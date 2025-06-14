@@ -9,7 +9,9 @@ use std::fmt;
 use bitcoin::address::FromScriptError;
 use bitcoin::psbt::Psbt;
 use bitcoin::transaction::InputWeightPrediction;
-use bitcoin::{bip32, psbt, Address, AddressType, Network, TxIn, TxOut, Weight};
+use bitcoin::{bip32, psbt, Address, AddressType, Network, TxOut, Weight};
+
+use crate::receive::InputPair;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum InconsistentPsbt {
@@ -37,7 +39,7 @@ pub(crate) trait PsbtExt: Sized {
     ) -> &mut BTreeMap<bip32::Xpub, (bip32::Fingerprint, bip32::DerivationPath)>;
     fn proprietary_mut(&mut self) -> &mut BTreeMap<psbt::raw::ProprietaryKey, Vec<u8>>;
     fn unknown_mut(&mut self) -> &mut BTreeMap<psbt::raw::Key, Vec<u8>>;
-    fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair<'_>> + '_>;
+    fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair> + '_>;
     // guarantees that length of psbt input matches that of unsigned_tx inputs and same
     /// thing for outputs.
     fn validate(self) -> Result<Self, InconsistentPsbt>;
@@ -61,13 +63,16 @@ impl PsbtExt for Psbt {
 
     fn unknown_mut(&mut self) -> &mut BTreeMap<psbt::raw::Key, Vec<u8>> { &mut self.unknown }
 
-    fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair<'_>> + '_> {
+    fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair> + '_> {
         Box::new(
             self.unsigned_tx
                 .input
                 .iter()
                 .zip(&self.inputs)
-                .map(|(txin, psbtin)| InternalInputPair { txin, psbtin }),
+                .map(|(txin, psbtin)| InternalInputPair {
+                    pair: InputPair { txin: txin.clone(), psbtin: psbtin.clone() },
+                    weight: Weight::ZERO,
+                }),
         )
     }
 
@@ -98,49 +103,50 @@ impl PsbtExt for Psbt {
 // https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#p2wpkh-nested-in-bip16-p2sh
 const NESTED_P2WPKH_MAX: InputWeightPrediction = InputWeightPrediction::from_slice(23, &[72, 33]);
 
+// TODO(arturgontijo): InputPairWithWeight makes more sense...
 #[derive(Clone, Debug)]
-pub(crate) struct InternalInputPair<'a> {
-    pub txin: &'a TxIn,
-    pub psbtin: &'a psbt::Input,
+pub(crate) struct InternalInputPair {
+    pub pair: InputPair,
+    pub weight: Weight,
 }
 
-impl InternalInputPair<'_> {
+impl InternalInputPair {
     /// Returns TxOut associated with the input
     pub fn previous_txout(&self) -> Result<&TxOut, PrevTxOutError> {
-        match (&self.psbtin.non_witness_utxo, &self.psbtin.witness_utxo) {
+        match (&self.pair.psbtin.non_witness_utxo, &self.pair.psbtin.witness_utxo) {
             (None, None) => Err(PrevTxOutError::MissingUtxoInformation),
             (_, Some(txout)) => Ok(txout),
             (Some(tx), None) => tx
                 .output
-                .get::<usize>(self.txin.previous_output.vout.try_into().map_err(|_| {
+                .get::<usize>(self.pair.txin.previous_output.vout.try_into().map_err(|_| {
                     PrevTxOutError::IndexOutOfBounds {
                         output_count: tx.output.len(),
-                        index: self.txin.previous_output.vout,
+                        index: self.pair.txin.previous_output.vout,
                     }
                 })?)
                 .ok_or(PrevTxOutError::IndexOutOfBounds {
                     output_count: tx.output.len(),
-                    index: self.txin.previous_output.vout,
+                    index: self.pair.txin.previous_output.vout,
                 }),
         }
     }
 
     pub fn validate_utxo(&self) -> Result<(), InternalPsbtInputError> {
-        match (&self.psbtin.non_witness_utxo, &self.psbtin.witness_utxo) {
+        match (&self.pair.psbtin.non_witness_utxo, &self.pair.psbtin.witness_utxo) {
             (None, None) =>
                 Err(InternalPsbtInputError::PrevTxOut(PrevTxOutError::MissingUtxoInformation)),
-            (Some(tx), None) if tx.compute_txid() == self.txin.previous_output.txid => tx
+            (Some(tx), None) if tx.compute_txid() == self.pair.txin.previous_output.txid => tx
                 .output
-                .get::<usize>(self.txin.previous_output.vout.try_into().map_err(|_| {
+                .get::<usize>(self.pair.txin.previous_output.vout.try_into().map_err(|_| {
                     PrevTxOutError::IndexOutOfBounds {
                         output_count: tx.output.len(),
-                        index: self.txin.previous_output.vout,
+                        index: self.pair.txin.previous_output.vout,
                     }
                 })?)
                 .ok_or_else(|| {
                     PrevTxOutError::IndexOutOfBounds {
                         output_count: tx.output.len(),
-                        index: self.txin.previous_output.vout,
+                        index: self.pair.txin.previous_output.vout,
                     }
                     .into()
                 })
@@ -148,19 +154,19 @@ impl InternalInputPair<'_> {
             (Some(_), None) => Err(InternalPsbtInputError::UnequalTxid),
             (None, Some(_)) => Ok(()),
             (Some(tx), Some(witness_txout))
-                if tx.compute_txid() == self.txin.previous_output.txid =>
+                if tx.compute_txid() == self.pair.txin.previous_output.txid =>
             {
                 let non_witness_txout = tx
                     .output
-                    .get::<usize>(self.txin.previous_output.vout.try_into().map_err(|_| {
+                    .get::<usize>(self.pair.txin.previous_output.vout.try_into().map_err(|_| {
                         PrevTxOutError::IndexOutOfBounds {
                             output_count: tx.output.len(),
-                            index: self.txin.previous_output.vout,
+                            index: self.pair.txin.previous_output.vout,
                         }
                     })?)
                     .ok_or(PrevTxOutError::IndexOutOfBounds {
                         output_count: tx.output.len(),
-                        index: self.txin.previous_output.vout,
+                        index: self.pair.txin.previous_output.vout,
                     })?;
                 if witness_txout == non_witness_txout {
                     Ok(())
@@ -182,39 +188,48 @@ impl InternalInputPair<'_> {
     }
 
     pub fn expected_input_weight(&self) -> Result<Weight, InputWeightError> {
-        use bitcoin::AddressType::*;
-
-        // Get the input weight prediction corresponding to spending an output of this address type
-        let iwp = match self.address_type()? {
-            P2pkh => Ok(InputWeightPrediction::P2PKH_COMPRESSED_MAX),
-            P2sh => {
-                // redeemScript can be extracted from scriptSig for signed P2SH inputs
-                let redeem_script = if let Some(ref script_sig) = self.psbtin.final_script_sig {
-                    script_sig.redeem_script()
-                    // try the PSBT redeem_script field for unsigned inputs.
-                } else {
-                    self.psbtin.redeem_script.as_ref().map(|script| script.as_ref())
-                };
-                match redeem_script {
-                    // Nested segwit p2wpkh.
-                    Some(script) if script.is_witness_program() && script.is_p2wpkh() =>
-                        Ok(NESTED_P2WPKH_MAX),
-                    // Other script or witness program.
-                    Some(_) => Err(InputWeightError::NotSupported),
-                    // No redeem script provided. Cannot determine the script type.
-                    None => Err(InputWeightError::NoRedeemScript),
-                }
-            }
-            P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-            P2wsh => Err(InputWeightError::NotSupported),
-            P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
-            _ => Err(AddressTypeError::UnknownAddressType.into()),
-        }?;
-
-        // Lengths of txid, index and sequence: (32, 4, 4).
-        let input_weight = iwp.weight() + Weight::from_non_witness_data_size(32 + 4 + 4);
-        Ok(input_weight)
+        expected_input_weight(self.address_type()?, &self.pair.psbtin, Some(self.weight))
     }
+}
+
+pub fn expected_input_weight(address_type: AddressType, psbtin: &psbt::Input, maybe_weight: Option<Weight>) -> Result<Weight, InputWeightError> {
+    use bitcoin::AddressType::*;
+
+    // Get the input weight prediction corresponding to spending an output of this address type
+    let iwp = match address_type {
+        P2pkh => Ok(InputWeightPrediction::P2PKH_COMPRESSED_MAX),
+        P2sh => {
+            // redeemScript can be extracted from scriptSig for signed P2SH inputs
+            let redeem_script = if let Some(ref script_sig) = psbtin.final_script_sig {
+                script_sig.redeem_script()
+                // try the PSBT redeem_script field for unsigned inputs.
+            } else {
+                psbtin.redeem_script.as_ref().map(|script| script.as_ref())
+            };
+            match redeem_script {
+                // Nested segwit p2wpkh.
+                Some(script) if script.is_witness_program() && script.is_p2wpkh() =>
+                    Ok(NESTED_P2WPKH_MAX),
+                // Other script or witness program.
+                Some(_) => Err(InputWeightError::NotSupported),
+                // No redeem script provided. Cannot determine the script type.
+                None => Err(InputWeightError::NoRedeemScript),
+            }
+        }
+        P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
+        P2wsh => if let Some(weight) = maybe_weight {
+            let witness_size = weight.to_wu() as usize;
+            Ok(InputWeightPrediction::new(0, &[witness_size]))
+        } else {
+            Err(InputWeightError::NotSupported)
+        }
+        P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
+        _ => Err(AddressTypeError::UnknownAddressType.into()),
+    }?;
+
+    // Lengths of txid, index and sequence: (32, 4, 4).
+    let input_weight = iwp.weight() + Weight::from_non_witness_data_size(32 + 4 + 4);
+    Ok(input_weight)
 }
 
 #[derive(Debug, PartialEq, Eq)]
