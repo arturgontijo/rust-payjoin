@@ -40,7 +40,7 @@ use super::error::{
 use super::optional_parameters::Params;
 use super::{InputPair, OutputSubstitutionError, ReplyableError, SelectionError};
 use crate::output_substitution::OutputSubstitution;
-use crate::psbt::{expected_input_weight, InternalInputPair, PsbtExt};
+use crate::psbt::{InternalInputPair, PsbtExt};
 use crate::receive::InternalPayloadError;
 use crate::ImplementationError;
 
@@ -670,8 +670,12 @@ impl ProvisionalProposal {
             if let Some(internal_input_pairs) = internal_input_pairs {
                 let mut acc = Weight::ZERO;
                 for input_pair in psbt.input_pairs() {
-                    let maybe_weight = internal_input_pairs.iter().find(|input| input.pair.txin.previous_output == input_pair.pair.txin.previous_output).map(|input| input.weight);
-                    let input_weight = expected_input_weight(input_pair.address_type().unwrap(), &InternalInputPair { pair: input_pair.pair.clone(), weight: maybe_weight.unwrap_or(Weight::ZERO) })
+                    let input_pair = internal_input_pairs
+                        .iter()
+                        .find(|input| input.pair.txin.previous_output == input_pair.pair.txin.previous_output)
+                        .unwrap_or(&input_pair);
+                    let input_weight = input_pair
+                        .expected_input_weight()
                         .map_err(InternalPayloadError::InputWeight)?;
                     acc += input_weight;
                 }

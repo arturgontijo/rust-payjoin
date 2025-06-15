@@ -13,6 +13,7 @@ use bitcoin::{bip32, psbt, Address, AddressType, Network, TxOut, Weight};
 use serde::{Deserialize, Serialize};
 
 use crate::receive::InputPair;
+use crate::send::v1::NON_WITNESS_INPUT_WEIGHT;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum InconsistentPsbt {
@@ -189,51 +190,49 @@ impl InternalInputPair {
     }
 
     pub fn expected_input_weight(&self) -> Result<Weight, InputWeightError> {
-        expected_input_weight(self.address_type()?, &self)
-    }
-}
+        use bitcoin::AddressType::*;
 
-pub fn expected_input_weight(address_type: AddressType, internal_input_pair: &InternalInputPair) -> Result<Weight, InputWeightError> {
-    use bitcoin::AddressType::*;
+        let (txin, psbtin, weight) = (&self.pair.txin, &self.pair.psbtin, self.weight);
 
-    // Get the input weight prediction corresponding to spending an output of this address type
-    let iwp = match address_type {
-        P2pkh => Ok(InputWeightPrediction::P2PKH_COMPRESSED_MAX),
-        P2sh => {
-            // redeemScript can be extracted from scriptSig for signed P2SH inputs
-            let redeem_script = if let Some(ref script_sig) = internal_input_pair.pair.psbtin.final_script_sig {
-                script_sig.redeem_script()
-                // try the PSBT redeem_script field for unsigned inputs.
-            } else {
-                internal_input_pair.pair.psbtin.redeem_script.as_ref().map(|script| script.as_ref())
-            };
-            match redeem_script {
-                // Nested segwit p2wpkh.
-                Some(script) if script.is_witness_program() && script.is_p2wpkh() =>
-                    Ok(NESTED_P2WPKH_MAX),
-                // Other script or witness program.
-                Some(_) => Err(InputWeightError::NotSupported),
-                // No redeem script provided. Cannot determine the script type.
-                None => Err(InputWeightError::NoRedeemScript),
+        // Get the input weight prediction corresponding to spending an output of this address type
+        let iwp = match self.address_type()? {
+            P2pkh => Ok(InputWeightPrediction::P2PKH_COMPRESSED_MAX),
+            P2sh => {
+                // redeemScript can be extracted from scriptSig for signed P2SH inputs
+                let redeem_script = if let Some(ref script_sig) = psbtin.final_script_sig {
+                    script_sig.redeem_script()
+                    // try the PSBT redeem_script field for unsigned inputs.
+                } else {
+                    psbtin.redeem_script.as_ref().map(|script| script.as_ref())
+                };
+                match redeem_script {
+                    // Nested segwit p2wpkh.
+                    Some(script) if script.is_witness_program() && script.is_p2wpkh() =>
+                        Ok(NESTED_P2WPKH_MAX),
+                    // Other script or witness program.
+                    Some(_) => Err(InputWeightError::NotSupported),
+                    // No redeem script provided. Cannot determine the script type.
+                    None => Err(InputWeightError::NoRedeemScript),
+                }
             }
-        }
-        P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-        P2wsh => if internal_input_pair.pair.psbtin.final_script_witness.is_some() {
-            let witness_size = internal_input_pair.pair.txin.segwit_weight().to_wu() as usize;
-            Ok(InputWeightPrediction::new(0, &[witness_size]))
-        } else if internal_input_pair.weight > Weight::ZERO {
-            let witness_size = internal_input_pair.weight.to_wu() as usize;
-            Ok(InputWeightPrediction::new(0, &[witness_size]))
-        } else {
-            Err(InputWeightError::NotSupported)
-        }
-        P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
-        _ => Err(AddressTypeError::UnknownAddressType.into()),
-    }?;
+            P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
+            P2wsh => if psbtin.final_script_witness.is_some() {
+                let witness_size = txin.segwit_weight().to_wu() as usize;
+                Ok(InputWeightPrediction::new(0, &[witness_size]))
+            } else if weight > Weight::ZERO {
+                let witness_size = weight.to_wu() as usize;
+                Ok(InputWeightPrediction::new(0, &[witness_size]))
+            } else {
+                Err(InputWeightError::NoWitnessScriptWeight)
+            }
+            P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
+            _ => Err(AddressTypeError::UnknownAddressType.into()),
+        }?;
 
-    // Lengths of txid, index and sequence: (32, 4, 4).
-    let input_weight = iwp.weight() + Weight::from_non_witness_data_size(32 + 4 + 4);
-    Ok(input_weight)
+        // Add the non_witness weight.
+        let input_weight = iwp.weight() + NON_WITNESS_INPUT_WEIGHT;
+        Ok(input_weight)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -370,6 +369,7 @@ impl From<FromScriptError> for AddressTypeError {
 pub(crate) enum InputWeightError {
     AddressType(AddressTypeError),
     NoRedeemScript,
+    NoWitnessScriptWeight,
     NotSupported,
 }
 
@@ -378,6 +378,7 @@ impl fmt::Display for InputWeightError {
         match self {
             Self::AddressType(_) => write!(f, "invalid address type"),
             Self::NoRedeemScript => write!(f, "p2sh input missing a redeem script"),
+            Self::NoWitnessScriptWeight => write!(f, "p2wsh input missing a witness script weight"),
             Self::NotSupported => write!(f, "weight prediction not supported"),
         }
     }
@@ -388,6 +389,7 @@ impl std::error::Error for InputWeightError {
         match self {
             Self::AddressType(error) => Some(error),
             Self::NoRedeemScript => None,
+            Self::NoWitnessScriptWeight => None,
             Self::NotSupported => None,
         }
     }
