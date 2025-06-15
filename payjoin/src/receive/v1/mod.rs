@@ -481,7 +481,9 @@ impl WantsInputs {
         self,
         inputs: impl IntoIterator<Item = InputPair>,
     ) -> Result<WantsInputs, InputContributionError> {
-        self._contribute_inputs(inputs.into_iter().map(|input| InternalInputPair::from(&input)).collect())
+        self._contribute_inputs(
+            inputs.into_iter().map(|input| InternalInputPair::from(&input)).collect(),
+        )
     }
 
     pub fn contribute_inputs_with_weights(
@@ -490,7 +492,13 @@ impl WantsInputs {
         input_weights: impl IntoIterator<Item = Weight>,
     ) -> Result<WantsInputs, InputContributionError> {
         let input_weights: Vec<Weight> = input_weights.into_iter().collect();
-        self._contribute_inputs(inputs.into_iter().zip(input_weights).map(|(input, weight)| InternalInputPair::from_with_weight(&input, weight)).collect())
+        self._contribute_inputs(
+            inputs
+                .into_iter()
+                .zip(input_weights)
+                .map(|(input, weight)| InternalInputPair::from_with_weight(&input, weight))
+                .collect(),
+        )
     }
 
     fn _contribute_inputs(
@@ -666,13 +674,18 @@ impl ProvisionalProposal {
 
     /// Calculate the additional input weight contributed by the receiver
     fn additional_input_weight(&self) -> Result<Weight, InternalPayloadError> {
-        fn inputs_weight(psbt: &Psbt, internal_input_pairs: &Option<Vec<InternalInputPair>>) -> Result<Weight, InternalPayloadError> {
+        fn inputs_weight(
+            psbt: &Psbt,
+            internal_input_pairs: &Option<Vec<InternalInputPair>>,
+        ) -> Result<Weight, InternalPayloadError> {
             if let Some(internal_input_pairs) = internal_input_pairs {
                 let mut acc = Weight::ZERO;
                 for input_pair in psbt.input_pairs() {
                     let input_pair = internal_input_pairs
                         .iter()
-                        .find(|input| input.pair.txin.previous_output == input_pair.pair.txin.previous_output)
+                        .find(|input| {
+                            input.pair.txin.previous_output == input_pair.pair.txin.previous_output
+                        })
                         .unwrap_or(&input_pair);
                     let input_weight = input_pair
                         .expected_input_weight()

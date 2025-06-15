@@ -11,7 +11,9 @@
 
 use std::str::FromStr;
 
-use bitcoin::{psbt, AddressType, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Weight};
+use bitcoin::{
+    psbt, AddressType, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Weight,
+};
 pub(crate) use error::InternalPayloadError;
 pub use error::{
     Error, InputContributionError, JsonReply, OutputSubstitutionError, PayloadError,
@@ -212,7 +214,9 @@ impl From<&InputPair> for InternalInputPair {
 }
 
 impl InternalInputPair {
-    pub fn from_with_weight(pair: &InputPair, weight: Weight) -> Self { Self { pair: pair.clone(), weight } }
+    pub fn from_with_weight(pair: &InputPair, weight: Weight) -> Self {
+        Self { pair: pair.clone(), weight }
+    }
 }
 
 /// Validate the payload of a Payjoin request for PSBT and Params sanity

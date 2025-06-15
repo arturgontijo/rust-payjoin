@@ -66,16 +66,12 @@ impl PsbtExt for Psbt {
     fn unknown_mut(&mut self) -> &mut BTreeMap<psbt::raw::Key, Vec<u8>> { &mut self.unknown }
 
     fn input_pairs(&self) -> Box<dyn Iterator<Item = InternalInputPair> + '_> {
-        Box::new(
-            self.unsigned_tx
-                .input
-                .iter()
-                .zip(&self.inputs)
-                .map(|(txin, psbtin)| InternalInputPair {
-                    pair: InputPair { txin: txin.clone(), psbtin: psbtin.clone() },
-                    weight: Weight::ZERO,
-                }),
-        )
+        Box::new(self.unsigned_tx.input.iter().zip(&self.inputs).map(|(txin, psbtin)| {
+            InternalInputPair {
+                pair: InputPair { txin: txin.clone(), psbtin: psbtin.clone() },
+                weight: Weight::ZERO,
+            }
+        }))
     }
 
     fn validate(self) -> Result<Self, InconsistentPsbt> {
@@ -216,15 +212,16 @@ impl InternalInputPair {
                 }
             }
             P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-            P2wsh => if psbtin.final_script_witness.is_some() {
-                let witness_size = txin.segwit_weight().to_wu() as usize;
-                Ok(InputWeightPrediction::new(0, &[witness_size]))
-            } else if weight > Weight::ZERO {
-                let witness_size = weight.to_wu() as usize;
-                Ok(InputWeightPrediction::new(0, &[witness_size]))
-            } else {
-                Err(InputWeightError::NoWitnessScriptWeight)
-            }
+            P2wsh =>
+                if psbtin.final_script_witness.is_some() {
+                    let witness_size = txin.segwit_weight().to_wu() as usize;
+                    Ok(InputWeightPrediction::new(0, &[witness_size]))
+                } else if weight > Weight::ZERO {
+                    let witness_size = weight.to_wu() as usize;
+                    Ok(InputWeightPrediction::new(0, &[witness_size]))
+                } else {
+                    Err(InputWeightError::NoWitnessScriptWeight)
+                },
             P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
             _ => Err(AddressTypeError::UnknownAddressType.into()),
         }?;

@@ -226,9 +226,11 @@ impl PsbtContext {
         for (proposed_txin, proposed_psbtin) in proposal_inputs {
             if let Some(original) = original_inputs.peek() {
                 if proposed_txin.previous_output == original.pair.txin.previous_output {
-                    proposed_psbtin.non_witness_utxo = original.pair.psbtin.non_witness_utxo.clone();
+                    proposed_psbtin.non_witness_utxo =
+                        original.pair.psbtin.non_witness_utxo.clone();
                     proposed_psbtin.witness_utxo = original.pair.psbtin.witness_utxo.clone();
-                    proposed_psbtin.bip32_derivation = original.pair.psbtin.bip32_derivation.clone();
+                    proposed_psbtin.bip32_derivation =
+                        original.pair.psbtin.bip32_derivation.clone();
                     proposed_psbtin.tap_internal_key = original.pair.psbtin.tap_internal_key;
                     proposed_psbtin.tap_key_origins = original.pair.psbtin.tap_key_origins.clone();
                     original_inputs.next();
