@@ -215,10 +215,10 @@ impl InternalInputPair {
             P2wsh =>
                 if psbtin.final_script_witness.is_some() {
                     let witness_size = txin.segwit_weight().to_wu() as usize;
-                    Ok(InputWeightPrediction::new(0, &[witness_size]))
+                    Ok(InputWeightPrediction::new(0, [witness_size]))
                 } else if weight > Weight::ZERO {
                     let witness_size = weight.to_wu() as usize;
-                    Ok(InputWeightPrediction::new(0, &[witness_size]))
+                    Ok(InputWeightPrediction::new(0, [witness_size]))
                 } else {
                     Err(InputWeightError::NoWitnessScriptWeight)
                 },
