@@ -11,13 +11,14 @@
 
 use std::str::FromStr;
 
-use bitcoin::{psbt, AddressType, Psbt, TxIn, TxOut};
+use bitcoin::{psbt, AddressType, Psbt, TxIn, TxOut, Weight};
 pub(crate) use error::InternalPayloadError;
 pub use error::{
     Error, InputContributionError, JsonReply, OutputSubstitutionError, PayloadError,
     ReplyableError, SelectionError,
 };
 use optional_parameters::Params;
+use serde::{Deserialize, Serialize};
 
 pub use crate::psbt::PsbtInputError;
 use crate::psbt::{InternalInputPair, InternalPsbtInputError, PsbtExt};
@@ -40,7 +41,7 @@ pub mod v2;
 
 /// Helper to construct a pair of (txin, psbtin) with some built-in validation
 /// Use with [`InputPair::new`] to contribute receiver inputs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputPair {
     pub(crate) txin: TxIn,
     pub(crate) psbtin: psbt::Input,
@@ -66,8 +67,12 @@ impl InputPair {
     }
 }
 
-impl<'a> From<&'a InputPair> for InternalInputPair<'a> {
-    fn from(pair: &'a InputPair) -> Self { Self { psbtin: &pair.psbtin, txin: &pair.txin } }
+impl From<&InputPair> for InternalInputPair {
+    fn from(pair: &InputPair) -> Self { Self { pair: pair.clone(), weight: Weight::ZERO } }
+}
+
+impl InternalInputPair {
+    pub fn from_with_weight(pair: &InputPair, weight: Weight) -> Self { Self { pair: pair.clone(), weight } }
 }
 
 /// Validate the payload of a Payjoin request for PSBT and Params sanity
