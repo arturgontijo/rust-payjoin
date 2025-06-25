@@ -7,6 +7,7 @@ pub use error::{
 };
 use payjoin::bitcoin::psbt::Psbt;
 use payjoin::bitcoin::FeeRate;
+use payjoin::bitcoin::Weight;
 use payjoin::persist::{Persister, Value};
 use payjoin::receive::v2::ReceiverToken;
 
@@ -390,11 +391,12 @@ impl InputPair {
     pub fn new(
         txin: bitcoin_ffi::TxIn,
         psbtin: crate::bitcoin_ffi::PsbtInput,
+        expected_weight: Option<Weight>,
     ) -> Result<Self, PsbtInputError> {
         Ok(Self(payjoin::receive::InputPair::new(
             txin.into(),
             psbtin.into(),
-            None,
+            expected_weight,
         )?))
     }
 }

@@ -180,6 +180,7 @@ pub(crate) enum InternalPayloadError {
     #[allow(dead_code)]
     /// The sender is trying to spend the receiver input
     InputOwned(bitcoin::ScriptBuf),
+    #[allow(dead_code)]
     /// The expected input weight cannot be determined
     InputWeight(crate::psbt::InputWeightError),
     #[allow(dead_code)]

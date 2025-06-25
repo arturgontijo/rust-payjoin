@@ -243,7 +243,6 @@ pub(crate) enum InternalPsbtInputError {
     /// TxOut provided in `segwit_utxo` doesn't match the one in `non_segwit_utxo`
     SegWitTxOutMismatch,
     AddressType(AddressTypeError),
-    NoRedeemScript,
     InvalidScriptPubKey(AddressType),
     WeightError(InputWeightError),
 }
@@ -255,9 +254,8 @@ impl fmt::Display for InternalPsbtInputError {
             Self::UnequalTxid => write!(f, "transaction ID of previous transaction doesn't match one specified in input spending it"),
             Self::SegWitTxOutMismatch => write!(f, "transaction output provided in SegWit UTXO field doesn't match the one in non-SegWit UTXO field"),
             Self::AddressType(_) => write!(f, "invalid address type"),
-            Self::NoRedeemScript => write!(f, "provided p2sh PSBT input is missing a redeem_script"),
             Self::InvalidScriptPubKey(e) => write!(f, "provided script was not a valid type of {e}"),
-            Self::WeightError(e) => write!(f, "{}", e),
+            Self::WeightError(e) => write!(f, "{e}"),
         }
     }
 }
@@ -269,7 +267,6 @@ impl std::error::Error for InternalPsbtInputError {
             Self::UnequalTxid => None,
             Self::SegWitTxOutMismatch => None,
             Self::AddressType(error) => Some(error),
-            Self::NoRedeemScript => None,
             Self::InvalidScriptPubKey(_) => None,
             Self::WeightError(error) => Some(error),
         }
