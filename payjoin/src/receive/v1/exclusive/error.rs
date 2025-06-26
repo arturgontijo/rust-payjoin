@@ -24,8 +24,8 @@ pub(crate) enum InternalRequestError {
     InvalidContentType(String),
     /// The Content-Length header could not be parsed as a number
     InvalidContentLength(std::num::ParseIntError),
-    /// The Content-Length value exceeds the maximum allowed size
-    ContentLengthTooLarge(usize),
+    /// The Content-Length value does not match the actual body length
+    ContentLengthMismatch { expected: usize, actual: usize },
 }
 
 impl From<InternalRequestError> for RequestError {
@@ -36,15 +36,15 @@ impl From<InternalRequestError> for super::ReplyableError {
     fn from(e: InternalRequestError) -> Self { super::ReplyableError::V1(e.into()) }
 }
 
-impl From<RequestError> for JsonReply {
-    fn from(e: RequestError) -> Self {
+impl From<&RequestError> for JsonReply {
+    fn from(e: &RequestError) -> Self {
         use InternalRequestError::*;
 
         match &e.0 {
             MissingHeader(_)
             | InvalidContentType(_)
             | InvalidContentLength(_)
-            | ContentLengthTooLarge(_) =>
+            | ContentLengthMismatch { .. } =>
                 JsonReply::new(crate::error_codes::ErrorCode::OriginalPsbtRejected, e),
         }
     }
@@ -57,8 +57,8 @@ impl fmt::Display for RequestError {
             InternalRequestError::InvalidContentType(content_type) =>
                 write!(f, "Invalid content type: {content_type}"),
             InternalRequestError::InvalidContentLength(e) => write!(f, "{e}"),
-            InternalRequestError::ContentLengthTooLarge(length) =>
-                write!(f, "Content length too large: {length}."),
+            InternalRequestError::ContentLengthMismatch { expected, actual } =>
+                write!(f, "Content length mismatch: expected {expected}, got {actual}."),
         }
     }
 }
@@ -69,7 +69,7 @@ impl error::Error for RequestError {
             InternalRequestError::InvalidContentLength(e) => Some(e),
             InternalRequestError::MissingHeader(_) => None,
             InternalRequestError::InvalidContentType(_) => None,
-            InternalRequestError::ContentLengthTooLarge(_) => None,
+            InternalRequestError::ContentLengthMismatch { .. } => None,
         }
     }
 }
