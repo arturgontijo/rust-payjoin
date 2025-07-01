@@ -206,7 +206,10 @@ impl InternalInputPair<'_> {
                 }
             }
             P2wpkh => Ok(InputWeightPrediction::P2WPKH_MAX),
-            P2wsh => Err(InputWeightError::NotSupported),
+            P2wsh => {
+                let witness_weight = self.txin.segwit_weight().to_wu() as usize;
+                Ok(InputWeightPrediction::new(0, [witness_weight]))
+            },
             P2tr => Ok(InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH),
             _ => Err(AddressTypeError::UnknownAddressType.into()),
         }?;
