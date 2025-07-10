@@ -784,6 +784,32 @@ impl Receiver<ProvisionalProposal> {
         )
     }
 
+    pub fn ready_to_sign_psbt(
+        self,
+        min_fee_rate: Option<FeeRate>,
+        max_effective_fee_rate: Option<FeeRate>,
+    ) -> Result<Psbt, ReplyableError> {
+        self.state.v1.ready_to_sign_psbt(min_fee_rate, max_effective_fee_rate)
+    }
+
+    pub fn finalize_proposal_with_signed_psbt(
+        self,
+        psbt: Psbt,
+    ) -> MaybeTransientTransition<SessionEvent, Receiver<PayjoinProposal>, ReplyableError> {
+        let inner = match self.state.v1.clone().finalize_proposal_with_signed_psbt(psbt) {
+            Ok(inner) => inner,
+            Err(e) => {
+                // v1::finalize_proposal returns a ReplyableError but the only error that can be returned is ImplementationError from the closure
+                // And that is a transient error
+                return MaybeTransientTransition::transient(e);
+            }
+        };
+        MaybeTransientTransition::success(
+            SessionEvent::PayjoinProposal(inner.clone()),
+            Receiver { state: PayjoinProposal { v1: inner, context: self.state.context.clone() } },
+        )
+    }
+
     pub(crate) fn apply_payjoin_proposal(self, v1: v1::PayjoinProposal) -> ReceiveSession {
         let new_state =
             Receiver { state: PayjoinProposal { v1, context: self.state.context.clone() } };

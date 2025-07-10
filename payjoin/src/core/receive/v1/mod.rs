@@ -762,6 +762,31 @@ impl ProvisionalProposal {
         let payjoin_proposal = self.prepare_psbt(psbt);
         Ok(payjoin_proposal)
     }
+
+    pub fn ready_to_sign_psbt(
+        mut self,
+        min_fee_rate: Option<FeeRate>,
+        max_effective_fee_rate: Option<FeeRate>,
+    ) -> Result<Psbt, ReplyableError> {
+        let psbt = self.apply_fee(min_fee_rate, max_effective_fee_rate)?;
+        Ok(psbt.clone())
+    }
+
+    pub fn finalize_proposal_with_signed_psbt(
+        self,
+        mut psbt: Psbt,
+    ) -> Result<PayjoinProposal, ReplyableError> {
+        // NOTE(arturgontijo): Compare the given PSBT against the current PSBT (maybe a check in txids)
+        // Remove now-invalid sender signatures before applying the receiver signatures
+        for i in self.sender_input_indexes() {
+            log::trace!("Clearing sender input {i}");
+            psbt.inputs[i].final_script_sig = None;
+            psbt.inputs[i].final_script_witness = None;
+            psbt.inputs[i].tap_key_sig = None;
+        }
+        let payjoin_proposal = self.prepare_psbt(psbt);
+        Ok(payjoin_proposal)
+    }
 }
 
 /// A finalized payjoin proposal, complete with fees and receiver signatures, that the sender
